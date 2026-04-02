@@ -1,0 +1,133 @@
+name: Deploy Stackable Full Platform
+
+on:
+  workflow_dispatch:
+    inputs:
+      location:
+        description: Azure region for the AKS cluster
+        required: false
+        default: swedencentral
+        type: string
+      allowed_source_ranges:
+        description: Optional comma-separated CIDR allowlist for the public ingress. Leave blank to skip ingress exposure.
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: deploy-stackable-full-platform
+  cancel-in-progress: false
+
+env:
+  AZURE_CORE_OUTPUT: none
+  RESOURCE_GROUP: dev-stackable-rg
+  SUBSCRIPTION_ID: 4910a5a6-aec6-405d-9294-c7f2845512a4
+  AKS_CLUSTER_NAME: dev-stackable-full-aks
+  USE_AZURE_CREDENTIALS: ${{ secrets.AZURE_CREDENTIALS != '' && 'true' || 'false' }}
+  AZURE_CREDENTIALS_JSON: ${{ secrets.AZURE_CREDENTIALS }}
+  AZURE_CLIENT_ID_VALUE: ${{ secrets.AZURE_CLIENT_ID }}
+  AZURE_TENANT_ID_VALUE: ${{ secrets.AZURE_TENANT_ID }}
+  AZURE_SUBSCRIPTION_ID_VALUE: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Azure Login With Service Principal Secret
+        if: ${{ env.USE_AZURE_CREDENTIALS == 'true' }}
+        uses: azure/login@v3
+        with:
+          creds: ${{ env.AZURE_CREDENTIALS_JSON }}
+
+      - name: Validate Azure OIDC Secrets
+        if: ${{ env.USE_AZURE_CREDENTIALS != 'true' }}
+        run: |
+          missing=()
+          [[ -n "${AZURE_CLIENT_ID_VALUE}" ]] || missing+=("AZURE_CLIENT_ID")
+          [[ -n "${AZURE_TENANT_ID_VALUE}" ]] || missing+=("AZURE_TENANT_ID")
+          if [[ ${#missing[@]} -gt 0 ]]; then
+            printf 'Missing required OIDC secret(s): %s\n' "${missing[*]}" >&2
+            exit 1
+          fi
+
+      - name: Azure Login With OIDC
+        if: ${{ env.USE_AZURE_CREDENTIALS != 'true' }}
+        uses: azure/login@v3
+        with:
+          client-id: ${{ env.AZURE_CLIENT_ID_VALUE }}
+          tenant-id: ${{ env.AZURE_TENANT_ID_VALUE }}
+          subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID_VALUE != '' && env.AZURE_SUBSCRIPTION_ID_VALUE || env.SUBSCRIPTION_ID }}
+
+      - name: Validate Required Secrets
+        env:
+          COCKPIT_ADMIN_PASSWORD: ${{ secrets.STACKABLE_COCKPIT_ADMIN_PASSWORD }}
+        run: |
+          if [[ -z "${COCKPIT_ADMIN_PASSWORD}" ]]; then
+            echo "STACKABLE_COCKPIT_ADMIN_PASSWORD must be set for the full platform workflow." >&2
+            exit 1
+          fi
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: latest
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v5
+        with:
+          version: latest
+
+      - name: Deploy Base AKS Cluster And Cockpit
+        env:
+          LOCATION: ${{ inputs.location }}
+          COCKPIT_ADMIN_PASSWORD: ${{ secrets.STACKABLE_COCKPIT_ADMIN_PASSWORD }}
+        run: |
+          bash ./scripts/deploy-stackable-full-aks.sh
+
+      - name: Deploy Full Platform Workloads
+        env:
+          AIRFLOW_ADMIN_PASSWORD: ${{ secrets.STACKABLE_AIRFLOW_ADMIN_PASSWORD }}
+          AIRFLOW_SECRET_KEY: ${{ secrets.STACKABLE_AIRFLOW_SECRET_KEY }}
+          TRINO_ADMIN_PASSWORD: ${{ secrets.STACKABLE_TRINO_ADMIN_PASSWORD }}
+          MINIO_ADMIN_PASSWORD: ${{ secrets.STACKABLE_MINIO_ADMIN_PASSWORD }}
+          SUPERSET_ADMIN_PASSWORD: ${{ secrets.STACKABLE_SUPERSET_ADMIN_PASSWORD }}
+          SUPERSET_SECRET_KEY: ${{ secrets.STACKABLE_SUPERSET_SECRET_KEY }}
+          NIFI_ADMIN_PASSWORD: ${{ secrets.STACKABLE_NIFI_ADMIN_PASSWORD }}
+        run: |
+          bash ./scripts/deploy-stackable-full-workloads.sh
+
+      - name: Expose Full Platform Via Public Ingress
+        if: ${{ inputs.allowed_source_ranges != '' }}
+        env:
+          ALLOWED_SOURCE_RANGES: ${{ inputs.allowed_source_ranges }}
+        run: |
+          bash ./scripts/expose-stackable-full-platform-ingress.sh
+
+      - name: Write Job Summary
+        if: ${{ always() }}
+        run: |
+          {
+            echo "## Stackable Full Platform"
+            echo "- Resource group: \`${RESOURCE_GROUP}\`"
+            echo "- Cluster: \`${AKS_CLUSTER_NAME}\`"
+            echo "- Location: \`${{ inputs.location }}\`"
+            if [[ -n "${{ inputs.allowed_source_ranges }}" ]]; then
+              echo "- Public ingress: enabled"
+              echo "- Allowed source ranges: \`${{ inputs.allowed_source_ranges }}\`"
+            else
+              echo "- Public ingress: skipped"
+            fi
+            echo
+            echo "See the workflow logs for the generated URLs and validation output."
+          } >> "${GITHUB_STEP_SUMMARY}"
