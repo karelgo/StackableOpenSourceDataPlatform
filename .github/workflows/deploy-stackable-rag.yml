@@ -100,16 +100,12 @@ jobs:
           AKS_NODE_VM_SIZE: ${{ inputs.aks_node_vm_size }}
           OLLAMA_CPU_REQUEST: ${{ inputs.ollama_cpu_request }}
           OLLAMA_CPU_LIMIT: ${{ inputs.ollama_cpu_limit }}
+          ENABLE_PUBLIC_HTTPS_INGRESS: ${{ inputs.allowed_source_ranges != '' && 'true' || 'false' }}
+          ALLOWED_SOURCE_RANGES: ${{ inputs.allowed_source_ranges }}
+          LETSENCRYPT_EMAIL: ${{ secrets.LETSENCRYPT_EMAIL }}
           ENABLE_PUBLIC_NODEPORTS: "false"
         run: |
           bash ./scripts/deploy-stackable-rag-aks.sh
-
-      - name: Expose OpenSearch Dashboards Via Public Ingress
-        if: ${{ inputs.allowed_source_ranges != '' }}
-        env:
-          ALLOWED_SOURCE_RANGES: ${{ inputs.allowed_source_ranges }}
-        run: |
-          bash ./scripts/expose-opensearch-dashboards-ingress.sh
 
       - name: Write Job Summary
         if: ${{ always() }}
@@ -122,10 +118,10 @@ jobs:
             echo "- Node size: \`${{ inputs.aks_node_vm_size }}\`"
             echo "- Ollama CPU request/limit: \`${{ inputs.ollama_cpu_request }} / ${{ inputs.ollama_cpu_limit }}\`"
             if [[ -n "${{ inputs.allowed_source_ranges }}" ]]; then
-              echo "- Public Dashboards ingress: enabled"
+              echo "- Public HTTPS ingress: enabled"
               echo "- Allowed source ranges: \`${{ inputs.allowed_source_ranges }}\`"
             else
-              echo "- Public Dashboards ingress: skipped"
+              echo "- Public HTTPS ingress: skipped"
             fi
             echo
             echo "See the workflow logs for the generated access details."

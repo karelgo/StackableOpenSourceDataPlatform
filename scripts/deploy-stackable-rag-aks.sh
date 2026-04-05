@@ -7,18 +7,20 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 SUBSCRIPTION_ID="${SUBSCRIPTION_ID:-4910a5a6-aec6-405d-9294-c7f2845512a4}"
 RESOURCE_GROUP="${RESOURCE_GROUP:-dev-stackable-rg}"
-LOCATION="${LOCATION:-westeurope}"
+LOCATION="${LOCATION:-swedencentral}"
 AKS_CLUSTER_NAME="${AKS_CLUSTER_NAME:-dev-stackable-aks}"
 AKS_NAMESPACE="${AKS_NAMESPACE:-default}"
 AKS_NODE_COUNT="${AKS_NODE_COUNT:-1}"
-AKS_NODE_VM_SIZE="${AKS_NODE_VM_SIZE:-Standard_D8s_v5}"
+AKS_NODE_VM_SIZE="${AKS_NODE_VM_SIZE:-Standard_D8s_v3}"
 AKS_NODE_OSDISK_SIZE="${AKS_NODE_OSDISK_SIZE:-128}"
 ENABLE_PUBLIC_NODEPORTS="${ENABLE_PUBLIC_NODEPORTS:-false}"
+ENABLE_PUBLIC_HTTPS_INGRESS="${ENABLE_PUBLIC_HTTPS_INGRESS:-true}"
 LISTENER_CLASS_PRESET="${LISTENER_CLASS_PRESET:-ephemeral-nodes}"
 DEPLOY_TIMEOUT="${DEPLOY_TIMEOUT:-45m}"
 KUBECONFIG_FILE="${KUBECONFIG_FILE:-${REPO_ROOT}/.kube/${AKS_CLUSTER_NAME}.yaml}"
 STACKABLECTL_BIN="${STACKABLECTL_BIN:-${REPO_ROOT}/.tools/stackablectl}"
 STACKABLECTL_DOWNLOAD_BASE_URL="${STACKABLECTL_DOWNLOAD_BASE_URL:-https://github.com/stackabletech/stackable-cockpit/releases/latest/download}"
+HTTPS_INGRESS_SCRIPT="${HTTPS_INGRESS_SCRIPT:-${SCRIPT_DIR}/expose-opensearch-dashboards-ingress.sh}"
 NODEPORT_RULE_NAME="${NODEPORT_RULE_NAME:-allow-stackable-nodeports}"
 NODEPORT_RULE_PRIORITY="${NODEPORT_RULE_PRIORITY:-350}"
 OLLAMA_CPU_REQUEST="${OLLAMA_CPU_REQUEST:-4}"
@@ -179,6 +181,25 @@ ensure_aks_cluster() {
   run "${args[@]}"
 }
 
+ensure_aks_cluster_running() {
+  local power_state
+
+  power_state="$(az aks show \
+    --resource-group "${RESOURCE_GROUP}" \
+    --name "${AKS_CLUSTER_NAME}" \
+    --query powerState.code \
+    --output tsv \
+    --only-show-errors 2>/dev/null || true)"
+
+  if [[ "${power_state}" == "Stopped" ]]; then
+    run az aks start \
+      --resource-group "${RESOURCE_GROUP}" \
+      --name "${AKS_CLUSTER_NAME}" \
+      --only-show-errors \
+      --output none
+  fi
+}
+
 ensure_kubeconfig() {
   mkdir -p "$(dirname "${KUBECONFIG_FILE}")"
 
@@ -298,29 +319,12 @@ patch_ollama_resources() {
   fi
 
   log "Patching ollama resources to request ${OLLAMA_CPU_REQUEST} CPU / ${OLLAMA_MEMORY_REQUEST} memory and limit ${OLLAMA_CPU_LIMIT} CPU / ${OLLAMA_MEMORY_LIMIT} memory"
-  kubectl -n "${AKS_NAMESPACE}" patch deployment ollama --type merge -p "{
-    \"spec\": {
-      \"template\": {
-        \"spec\": {
-          \"containers\": [
-            {
-              \"name\": \"ollama\",
-              \"resources\": {
-                \"requests\": {
-                  \"cpu\": \"${OLLAMA_CPU_REQUEST}\",
-                  \"memory\": \"${OLLAMA_MEMORY_REQUEST}\"
-                },
-                \"limits\": {
-                  \"cpu\": \"${OLLAMA_CPU_LIMIT}\",
-                  \"memory\": \"${OLLAMA_MEMORY_LIMIT}\"
-                }
-              }
-            }
-          ]
-        }
-      }
-    }
-  }" >/dev/null
+  run kubectl -n "${AKS_NAMESPACE}" set resources deployment/ollama \
+    --containers=ollama \
+    --requests="cpu=${OLLAMA_CPU_REQUEST},memory=${OLLAMA_MEMORY_REQUEST}" \
+    --limits="cpu=${OLLAMA_CPU_LIMIT},memory=${OLLAMA_MEMORY_LIMIT}" >/dev/null
+
+  run kubectl -n "${AKS_NAMESPACE}" rollout status deployment/ollama --timeout="${DEPLOY_TIMEOUT}"
 }
 
 wait_for_demo() {
@@ -329,6 +333,18 @@ wait_for_demo() {
   wait_for_rollout_match statefulset 'opensearch'
   wait_for_rollout_match deployment 'opensearch-dashboards'
   wait_for_job_match 'load-embeddings-from-git'
+}
+
+ensure_https_ingress() {
+  if [[ "$(to_lower "${ENABLE_PUBLIC_HTTPS_INGRESS}")" != "true" ]]; then
+    log "HTTPS ingress creation disabled"
+    return
+  fi
+
+  [[ -f "${HTTPS_INGRESS_SCRIPT}" ]] || fail "HTTPS ingress helper not found: ${HTTPS_INGRESS_SCRIPT}"
+
+  log "Creating trusted HTTPS ingress endpoints for the RAG demo"
+  run bash "${HTTPS_INGRESS_SCRIPT}"
 }
 
 show_access_details() {
@@ -350,6 +366,11 @@ show_access_details() {
   printf '  kubectl --kubeconfig %q -n %q port-forward service/opensearch-dashboards 5601:5601\n' "${KUBECONFIG_FILE}" "${AKS_NAMESPACE}"
   printf '\n'
 
+  if [[ "$(to_lower "${ENABLE_PUBLIC_HTTPS_INGRESS}")" == "true" ]]; then
+    printf 'Trusted HTTPS ingress was enabled. See the ingress summary above for the public JupyterLab and Dashboards URLs.\n'
+    printf '\n'
+  fi
+
   if [[ "$(to_lower "${ENABLE_PUBLIC_NODEPORTS}")" == "true" ]]; then
     external_ips="$(kubectl get nodes -o jsonpath='{range .items[*]}{range .status.addresses[?(@.type=="ExternalIP")]}{.address}{"\n"}{end}{end}')"
     if [[ -n "${external_ips}" ]]; then
@@ -363,16 +384,22 @@ show_access_details() {
 
 main() {
   ensure_bool "${ENABLE_PUBLIC_NODEPORTS}"
+  ensure_bool "${ENABLE_PUBLIC_HTTPS_INGRESS}"
 
   require_cmd az
   require_cmd kubectl
   require_cmd curl
+  if [[ "$(to_lower "${ENABLE_PUBLIC_HTTPS_INGRESS}")" == "true" ]]; then
+    require_cmd helm
+    require_cmd python3
+  fi
 
   ensure_azure_login
   select_subscription
   register_azure_providers
   ensure_resource_group
   ensure_aks_cluster
+  ensure_aks_cluster_running
   ensure_kubeconfig
   ensure_public_node_ips_if_requested
   ensure_namespace
@@ -385,6 +412,7 @@ main() {
   deploy_rag_demo
   patch_ollama_resources
   wait_for_demo
+  ensure_https_ingress
   show_access_details
 }
 

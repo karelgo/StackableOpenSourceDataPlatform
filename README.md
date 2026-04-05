@@ -9,6 +9,7 @@ The current upstream `opensearch-rag` demo manifests expect deployment into the 
 - `scripts/deploy-stackable-rag-aks.sh`: end-to-end AKS and demo deployment script
 - `scripts/deploy-stackable-full-aks.sh`: end-to-end AKS and full platform deployment script for the current full Stackable release plus Cockpit
 - `scripts/deploy-stackable-full-workloads.sh`: deploys a resource-trimmed set of actual Stackable workloads on `dev-stackable-full-aks`
+- `scripts/expose-opensearch-dashboards-ingress.sh`: exposes the RAG JupyterLab and Dashboards UIs through trusted HTTPS on a single ingress IP
 - `scripts/expose-stackable-full-platform-ingress.sh`: exposes the full-platform UIs through a single IP-restricted ingress
 - `.github/workflows/deploy-stackable-full-platform.yml`: GitHub Actions workflow for the full platform
 - `.github/workflows/deploy-stackable-rag.yml`: GitHub Actions workflow for the RAG demo
@@ -18,12 +19,14 @@ The current upstream `opensearch-rag` demo manifests expect deployment into the 
 
 - Azure subscription: `4910a5a6-aec6-405d-9294-c7f2845512a4`
 - Resource group: `dev-stackable-rg`
-- Location: `westeurope`
+- Location: `swedencentral`
 - AKS cluster: `dev-stackable-aks`
 - Namespace: `default`
-- Node size: `Standard_D8s_v5`
+- Node size: `Standard_D8s_v3`
 - Node count: `1`
 - Listener preset: `ephemeral-nodes`
+- Trusted HTTPS ingress: enabled
+- Base domain suffix: `sslip.io`
 
 The script writes a dedicated kubeconfig to `.kube/dev-stackable-aks.yaml` in this repo so it does not have to overwrite your default kubeconfig.
 
@@ -31,7 +34,9 @@ The script writes a dedicated kubeconfig to `.kube/dev-stackable-aks.yaml` in th
 
 - `az` logged into the `freshminds.nl` tenant
 - `kubectl`
+- `helm`
 - `curl`
+- `python3`
 
 ## Run
 
@@ -40,9 +45,34 @@ chmod +x ./scripts/deploy-stackable-rag-aks.sh
 ./scripts/deploy-stackable-rag-aks.sh
 ```
 
+## Default HTTPS ingress
+
+By default the RAG deployment now creates a public `ingress-nginx` load balancer, installs `cert-manager`, and issues trusted Let's Encrypt certificates for two `sslip.io` hostnames:
+
+- OpenSearch Dashboards
+- JupyterLab
+
+The ingress is application-restricted to your current public IP by default when you run the script locally.
+
+If you run the script from GitHub Actions or any other remote environment, set `ALLOWED_SOURCE_RANGES` explicitly so the ingress is not locked to the runner's egress IP:
+
+```bash
+ALLOWED_SOURCE_RANGES=84.104.63.18/32 \
+LETSENCRYPT_EMAIL=you@example.com \
+./scripts/deploy-stackable-rag-aks.sh
+```
+
+If the script cannot infer an email address for Let's Encrypt registration, set `LETSENCRYPT_EMAIL` explicitly.
+
+To disable public HTTPS ingress and keep the deployment private:
+
+```bash
+ENABLE_PUBLIC_HTTPS_INGRESS=false ./scripts/deploy-stackable-rag-aks.sh
+```
+
 ## Optional public NodePort access
 
-By default the script keeps access private and prints `kubectl port-forward` commands for JupyterLab and OpenSearch Dashboards.
+You can still use public NodePort access if you want direct node exposure instead of ingress:
 
 If you want direct external access from the internet, run:
 
@@ -57,22 +87,23 @@ In that mode the script:
 
 That is intentionally narrower than Stackable's generic AKS doc recommendation of allowing all inbound traffic.
 
-## Safer public ingress for dashboards
+## Reapply or repair the HTTPS ingress
 
-To expose only OpenSearch Dashboards through a public Azure LoadBalancer-backed ingress, restricted to your current public IP by default, run:
+If you need to re-run the HTTPS exposure step without redeploying the whole RAG stack, run:
 
 ```bash
 ./scripts/expose-opensearch-dashboards-ingress.sh
 ```
 
-You can override the allowlist if needed:
+You can override the allowlist or Let's Encrypt registration email if needed:
 
 ```bash
 ALLOWED_SOURCE_RANGES=84.104.63.18/32,203.0.113.10/32 \
+LETSENCRYPT_EMAIL=you@example.com \
 ./scripts/expose-opensearch-dashboards-ingress.sh
 ```
 
-This path is safer than public NodePorts because it exposes only ports `80/443` on a dedicated ingress load balancer and constrains allowed client CIDRs at both the Azure load balancer service and the ingress layer.
+This path exposes only `80/443` on a dedicated ingress load balancer and uses trusted certificates rather than the ingress controller's default self-signed certificate.
 
 ## Common overrides
 
@@ -83,6 +114,7 @@ AKS_NODE_COUNT=1 \
 AKS_NAMESPACE=default \
 OLLAMA_CPU_REQUEST=3 \
 OLLAMA_CPU_LIMIT=6 \
+ALLOWED_SOURCE_RANGES=84.104.63.18/32 \
 ./scripts/deploy-stackable-rag-aks.sh
 ```
 
@@ -209,9 +241,10 @@ Full platform workflow secrets:
 
 RAG workflow:
 
-- No extra secrets are required beyond Azure authentication
+- No extra secrets are required beyond Azure authentication if public HTTPS ingress stays disabled
+- If you enable public HTTPS ingress from GitHub Actions, also set `LETSENCRYPT_EMAIL`
 
 Ingress note:
 
-- The workflows only expose public ingress when you explicitly pass `allowed_source_ranges` as a workflow input
+- The RAG workflow only enables public HTTPS ingress when you explicitly pass `allowed_source_ranges` as a workflow input
 - This is deliberate: auto-detecting the public IP inside GitHub Actions would capture the GitHub runner egress IP, not your own client IP
