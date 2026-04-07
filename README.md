@@ -135,6 +135,7 @@ Defaults:
 - Resource group: `dev-stackable-rg`
 - AKS cluster: `dev-stackable-full-aks`
 - Location: `swedencentral`
+- AKS pricing tier: `Standard` (paid control plane)
 - Node count: `2`
 - Node size: `Standard_D4s_v3`
 - Auxiliary nodepool: `d2pool` with `1 x Standard_D2s_v3`
@@ -175,7 +176,7 @@ The script deploys:
 - Superset plus PostgreSQL in `stackable-analytics`
 - NiFi in `stackable-streaming`
 
-This script is tuned for the current quota-constrained AKS shape in this subscription: `2 x Standard_D4s_v3` plus `1 x Standard_D2s_v3`.
+This script is tuned for the current quota-constrained AKS shape in this subscription: `2 x Standard_D4s_v3` plus `1 x Standard_D2s_v3`. In `swedencentral`, the current subscription quota is fully allocated at `10 / 10` regional vCPUs, so increasing worker-node capacity requires a quota increase or a different region.
 
 Default UI credentials created by the workload script:
 
@@ -236,7 +237,8 @@ Azure authentication:
 
 Full platform workflow secrets:
 
-- Required: `STACKABLE_COCKPIT_ADMIN_PASSWORD`
+- Optional: `STACKABLE_COCKPIT_ADMIN_PASSWORD`
+- If omitted, Cockpit falls back to the demo credential `admin` / `adminadmin`
 - Optional overrides: `STACKABLE_AIRFLOW_ADMIN_PASSWORD`, `STACKABLE_AIRFLOW_SECRET_KEY`, `STACKABLE_TRINO_ADMIN_PASSWORD`, `STACKABLE_MINIO_ADMIN_PASSWORD`, `STACKABLE_SUPERSET_ADMIN_PASSWORD`, `STACKABLE_SUPERSET_SECRET_KEY`, `STACKABLE_NIFI_ADMIN_PASSWORD`
 
 RAG workflow:

@@ -21,27 +21,31 @@ AIRFLOW_ADMIN_PASSWORD="${AIRFLOW_ADMIN_PASSWORD:-adminadmin}"
 AIRFLOW_SECRET_KEY="${AIRFLOW_SECRET_KEY:-airflowSecretKey}"
 TRINO_ADMIN_PASSWORD="${TRINO_ADMIN_PASSWORD:-adminadmin}"
 MINIO_ADMIN_PASSWORD="${MINIO_ADMIN_PASSWORD:-adminadmin}"
+MINIO_AWSCLI_IMAGE="${MINIO_AWSCLI_IMAGE:-amazon/aws-cli:2.17.37}"
+MINIO_AIRFLOW_LOG_BUCKET="${MINIO_AIRFLOW_LOG_BUCKET:-airflow}"
+MINIO_WAREHOUSE_BUCKET="${MINIO_WAREHOUSE_BUCKET:-warehouse}"
+HIVE_METASTORE_WAREHOUSE_DIR="${HIVE_METASTORE_WAREHOUSE_DIR:-s3a://${MINIO_WAREHOUSE_BUCKET}/}"
 SUPERSET_ADMIN_PASSWORD="${SUPERSET_ADMIN_PASSWORD:-adminadmin}"
 SUPERSET_SECRET_KEY="${SUPERSET_SECRET_KEY:-supersetSecretKey}"
 NIFI_ADMIN_PASSWORD="${NIFI_ADMIN_PASSWORD:-adminadmin}"
 AIRFLOW_BACKGROUND_CPU_REQUEST="${AIRFLOW_BACKGROUND_CPU_REQUEST:-250m}"
 AIRFLOW_BACKGROUND_CPU_LIMIT="${AIRFLOW_BACKGROUND_CPU_LIMIT:-500m}"
 AIRFLOW_BACKGROUND_MEMORY_LIMIT="${AIRFLOW_BACKGROUND_MEMORY_LIMIT:-512Mi}"
-AIRFLOW_WEBSERVER_CPU_REQUEST="${AIRFLOW_WEBSERVER_CPU_REQUEST:-500m}"
+AIRFLOW_WEBSERVER_CPU_REQUEST="${AIRFLOW_WEBSERVER_CPU_REQUEST:-250m}"
 AIRFLOW_WEBSERVER_CPU_LIMIT="${AIRFLOW_WEBSERVER_CPU_LIMIT:-1}"
 AIRFLOW_WEBSERVER_MEMORY_LIMIT="${AIRFLOW_WEBSERVER_MEMORY_LIMIT:-1Gi}"
-TRINO_CPU_REQUEST="${TRINO_CPU_REQUEST:-100m}"
+TRINO_CPU_REQUEST="${TRINO_CPU_REQUEST:-50m}"
 TRINO_CPU_LIMIT="${TRINO_CPU_LIMIT:-500m}"
 TRINO_MEMORY_LIMIT="${TRINO_MEMORY_LIMIT:-1Gi}"
-TRINO_INIT_CPU_REQUEST="${TRINO_INIT_CPU_REQUEST:-100m}"
+TRINO_INIT_CPU_REQUEST="${TRINO_INIT_CPU_REQUEST:-50m}"
 TRINO_INIT_CPU_LIMIT="${TRINO_INIT_CPU_LIMIT:-500m}"
 TRINO_INIT_MEMORY_REQUEST="${TRINO_INIT_MEMORY_REQUEST:-512Mi}"
 TRINO_INIT_MEMORY_LIMIT="${TRINO_INIT_MEMORY_LIMIT:-1Gi}"
-TRINO_SIDECAR_CPU_REQUEST="${TRINO_SIDECAR_CPU_REQUEST:-50m}"
+TRINO_SIDECAR_CPU_REQUEST="${TRINO_SIDECAR_CPU_REQUEST:-20m}"
 TRINO_SIDECAR_CPU_LIMIT="${TRINO_SIDECAR_CPU_LIMIT:-100m}"
 TRINO_SIDECAR_MEMORY_REQUEST="${TRINO_SIDECAR_MEMORY_REQUEST:-32Mi}"
 TRINO_SIDECAR_MEMORY_LIMIT="${TRINO_SIDECAR_MEMORY_LIMIT:-64Mi}"
-SUPERSET_CPU_REQUEST="${SUPERSET_CPU_REQUEST:-100m}"
+SUPERSET_CPU_REQUEST="${SUPERSET_CPU_REQUEST:-50m}"
 SUPERSET_CPU_LIMIT="${SUPERSET_CPU_LIMIT:-500m}"
 SUPERSET_MEMORY_LIMIT="${SUPERSET_MEMORY_LIMIT:-1Gi}"
 NIFI_CPU_REQUEST="${NIFI_CPU_REQUEST:-250m}"
@@ -51,6 +55,12 @@ NIFI_INIT_CPU_REQUEST="${NIFI_INIT_CPU_REQUEST:-250m}"
 NIFI_INIT_CPU_LIMIT="${NIFI_INIT_CPU_LIMIT:-500m}"
 NIFI_INIT_MEMORY_REQUEST="${NIFI_INIT_MEMORY_REQUEST:-1Gi}"
 NIFI_INIT_MEMORY_LIMIT="${NIFI_INIT_MEMORY_LIMIT:-1536Mi}"
+STACKABLE_SECRET_CSI_CPU_REQUEST="${STACKABLE_SECRET_CSI_CPU_REQUEST:-40m}"
+STACKABLE_SECRET_CSI_CPU_LIMIT="${STACKABLE_SECRET_CSI_CPU_LIMIT:-100m}"
+STACKABLE_SECRET_CSI_MEMORY_REQUEST="${STACKABLE_SECRET_CSI_MEMORY_REQUEST:-64Mi}"
+STACKABLE_SECRET_CSI_MEMORY_LIMIT="${STACKABLE_SECRET_CSI_MEMORY_LIMIT:-128Mi}"
+AIRFLOW_STACK_ALREADY_PRESENT="false"
+STORAGE_STACK_ALREADY_PRESENT="false"
 
 log() {
   printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"
@@ -87,6 +97,7 @@ patch_listener_classes_internal() {
 
 install_airflow_stack() {
   if kubectl -n "${AIRFLOW_NAMESPACE}" get airflowcluster airflow >/dev/null 2>&1; then
+    AIRFLOW_STACK_ALREADY_PRESENT="true"
     log "Airflow stack already present in namespace ${AIRFLOW_NAMESPACE}; skipping initial install"
     return
   fi
@@ -99,6 +110,62 @@ install_airflow_stack() {
     --parameters "minioAdminPassword=${MINIO_ADMIN_PASSWORD}" \
     --parameters "airflowAdminPassword=${AIRFLOW_ADMIN_PASSWORD}" \
     --parameters "airflowSecretKey=${AIRFLOW_SECRET_KEY}"
+}
+
+pin_disk_backed_workloads_to_primary_pool() {
+  if kubectl -n "${AIRFLOW_NAMESPACE}" get kafkacluster kafka >/dev/null 2>&1; then
+    run kubectl -n "${AIRFLOW_NAMESPACE}" patch kafkacluster kafka \
+      --type merge \
+      -p '{"spec":{"brokers":{"config":{"affinity":{"nodeSelector":{"agentpool":"nodepool1"}}}},"controllers":{"config":{"affinity":{"nodeSelector":{"agentpool":"nodepool1"}}}}}}'
+  fi
+
+  if kubectl -n "${AIRFLOW_NAMESPACE}" get deployment minio >/dev/null 2>&1; then
+    run kubectl -n "${AIRFLOW_NAMESPACE}" patch deployment minio \
+      --type merge \
+      -p '{"spec":{"template":{"spec":{"nodeSelector":{"agentpool":"nodepool1"}}}}}'
+  fi
+}
+
+controller_needs_restart() {
+  local namespace kind name desired ready
+  namespace="$1"
+  kind="$2"
+  name="$3"
+
+  if ! kubectl -n "${namespace}" get "${kind}" "${name}" >/dev/null 2>&1; then
+    return 1
+  fi
+
+  desired="$(kubectl -n "${namespace}" get "${kind}" "${name}" -o jsonpath='{.spec.replicas}' 2>/dev/null || true)"
+  ready="$(kubectl -n "${namespace}" get "${kind}" "${name}" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)"
+
+  desired="${desired:-0}"
+  ready="${ready:-0}"
+
+  [[ "${desired}" -gt 0 && "${ready}" -lt "${desired}" ]]
+}
+
+restart_unready_existing_workloads() {
+  if [[ "${AIRFLOW_STACK_ALREADY_PRESENT}" == "true" ]]; then
+    if controller_needs_restart "${AIRFLOW_NAMESPACE}" deployment minio; then
+      log "Recreating minio so the patched nodeSelector can take effect"
+      run kubectl -n "${AIRFLOW_NAMESPACE}" scale deployment/minio --replicas=0
+      kubectl -n "${AIRFLOW_NAMESPACE}" wait --for=delete pod -l app=minio --timeout=10m >/dev/null 2>&1 || true
+      run kubectl -n "${AIRFLOW_NAMESPACE}" scale deployment/minio --replicas=1
+    fi
+
+    if controller_needs_restart "${AIRFLOW_NAMESPACE}" statefulset kafka-broker-default; then
+      log "Restarting kafka-broker-default so it can be rescheduled after an existing-cluster rerun"
+      run kubectl -n "${AIRFLOW_NAMESPACE}" rollout restart statefulset/kafka-broker-default
+    fi
+  fi
+
+  if [[ "${STORAGE_STACK_ALREADY_PRESENT}" == "true" ]]; then
+    if controller_needs_restart "${STORAGE_NAMESPACE}" statefulset hdfs-datanode-default; then
+      log "Deleting hdfs-datanode-default-0 so the updated StatefulSet template can recreate it on the right node"
+      run kubectl -n "${STORAGE_NAMESPACE}" delete pod hdfs-datanode-default-0 --wait=false
+    fi
+  fi
 }
 
 normalize_airflow_stack_exposure() {
@@ -137,6 +204,15 @@ downsize_stackable_operator_deployments() {
       --requests=cpu=50m,memory=64Mi \
       --limits=cpu=200m,memory=256Mi
   done < <(kubectl -n "${OPERATOR_NAMESPACE}" get deployment -o name 2>/dev/null || true)
+}
+
+downsize_stackable_secret_csi_daemonset() {
+  if kubectl -n "${OPERATOR_NAMESPACE}" get daemonset secret-operator-csi-node-driver >/dev/null 2>&1; then
+    run kubectl -n "${OPERATOR_NAMESPACE}" set resources daemonset/secret-operator-csi-node-driver \
+      --containers='*' \
+      --requests="cpu=${STACKABLE_SECRET_CSI_CPU_REQUEST},memory=${STACKABLE_SECRET_CSI_MEMORY_REQUEST}" \
+      --limits="cpu=${STACKABLE_SECRET_CSI_CPU_LIMIT},memory=${STACKABLE_SECRET_CSI_MEMORY_LIMIT}"
+  fi
 }
 
 tune_cockpit_resources() {
@@ -180,12 +256,26 @@ tune_trino_stack() {
         {"name":"trino","resources":{"requests":{"cpu":"${TRINO_CPU_REQUEST}","memory":"${TRINO_MEMORY_LIMIT}"},"limits":{"cpu":"${TRINO_CPU_LIMIT}","memory":"${TRINO_MEMORY_LIMIT}"}}},
         {"name":"password-file-updater","resources":{"requests":{"cpu":"${TRINO_SIDECAR_CPU_REQUEST}","memory":"${TRINO_SIDECAR_MEMORY_REQUEST}"},"limits":{"cpu":"${TRINO_SIDECAR_CPU_LIMIT}","memory":"${TRINO_SIDECAR_MEMORY_LIMIT}"}}}
       ]
-    }}
-  },
-  "workers":{"config":{"resources":{"cpu":{"min":"${TRINO_CPU_REQUEST}","max":"${TRINO_CPU_LIMIT}"},"memory":{"limit":"${TRINO_MEMORY_LIMIT}"}}}}
+	    }}
+	  },
+	  "workers":{
+	    "config":{"resources":{"cpu":{"min":"${TRINO_CPU_REQUEST}","max":"${TRINO_CPU_LIMIT}"},"memory":{"limit":"${TRINO_MEMORY_LIMIT}"}}},
+	    "podOverrides":{"spec":{
+	      "nodeSelector":{"agentpool":"nodepool1"},
+	      "initContainers":[{"name":"prepare","resources":{"requests":{"cpu":"${TRINO_INIT_CPU_REQUEST}","memory":"${TRINO_INIT_MEMORY_REQUEST}"},"limits":{"cpu":"${TRINO_INIT_CPU_LIMIT}","memory":"${TRINO_INIT_MEMORY_LIMIT}"}}}],
+	      "containers":[
+	        {"name":"trino","resources":{"requests":{"cpu":"${TRINO_CPU_REQUEST}","memory":"${TRINO_MEMORY_LIMIT}"},"limits":{"cpu":"${TRINO_CPU_LIMIT}","memory":"${TRINO_MEMORY_LIMIT}"}}}
+	      ]
+	    }}
+	  }
 }}
 EOF
 )"
+
+    kubectl -n "${AIRFLOW_NAMESPACE}" patch trinocluster trino \
+      --type json \
+      -p '[{"op":"remove","path":"/spec/coordinators/podOverrides/spec/nodeSelector/kubernetes.io~1hostname"}]' \
+      >/dev/null 2>&1 || true
   fi
 }
 
@@ -204,6 +294,97 @@ downsize_minio() {
       --requests=cpu=200m,memory=512Mi \
       --limits=cpu=500m,memory=1Gi
   fi
+}
+
+ensure_minio_online() {
+  local replicas
+
+  if ! kubectl -n "${AIRFLOW_NAMESPACE}" get deployment minio >/dev/null 2>&1; then
+    return
+  fi
+
+  replicas="$(kubectl -n "${AIRFLOW_NAMESPACE}" get deployment minio -o jsonpath='{.spec.replicas}' 2>/dev/null || true)"
+  replicas="${replicas:-0}"
+
+  if [[ "${replicas}" -lt 1 ]]; then
+    run kubectl -n "${AIRFLOW_NAMESPACE}" scale deployment/minio --replicas=1
+  fi
+
+  run kubectl -n "${AIRFLOW_NAMESPACE}" rollout status deployment/minio --timeout=20m
+}
+
+ensure_minio_buckets() {
+  local pod_name endpoint
+
+  if ! kubectl -n "${AIRFLOW_NAMESPACE}" get deployment minio >/dev/null 2>&1; then
+    return
+  fi
+
+  pod_name="minio-bucket-bootstrap-$(date +%s)"
+  endpoint="https://minio.${AIRFLOW_NAMESPACE}.svc.cluster.local:9000"
+
+  kubectl -n "${AIRFLOW_NAMESPACE}" delete pod "${pod_name}" --ignore-not-found=true >/dev/null 2>&1 || true
+
+  run kubectl -n "${AIRFLOW_NAMESPACE}" run "${pod_name}" \
+    --image="${MINIO_AWSCLI_IMAGE}" \
+    --restart=Never \
+    --env="AWS_ACCESS_KEY_ID=admin" \
+    --env="AWS_SECRET_ACCESS_KEY=${MINIO_ADMIN_PASSWORD}" \
+    --env="AWS_DEFAULT_REGION=us-east-1" \
+    --command -- sh -lc \
+    "set -e; \
+    aws --endpoint-url ${endpoint} --no-verify-ssl s3api create-bucket --bucket ${MINIO_WAREHOUSE_BUCKET} >/dev/null 2>&1 || true; \
+    aws --endpoint-url ${endpoint} --no-verify-ssl s3api create-bucket --bucket ${MINIO_AIRFLOW_LOG_BUCKET} >/dev/null 2>&1 || true; \
+    aws --endpoint-url ${endpoint} --no-verify-ssl s3api list-buckets >/dev/null"
+
+  run kubectl -n "${AIRFLOW_NAMESPACE}" wait --for=jsonpath='{.status.phase}'=Succeeded "pod/${pod_name}" --timeout=10m
+  run kubectl -n "${AIRFLOW_NAMESPACE}" delete pod "${pod_name}" --ignore-not-found=true
+}
+
+tune_hive_metastore() {
+  if kubectl -n "${AIRFLOW_NAMESPACE}" get hivecluster hive-iceberg >/dev/null 2>&1; then
+    run kubectl -n "${AIRFLOW_NAMESPACE}" patch hivecluster hive-iceberg \
+      --type merge \
+      -p "$(cat <<EOF
+{"spec":{"metastore":{"configOverrides":{"hive-site.xml":{"hive.metastore.warehouse.dir":"${HIVE_METASTORE_WAREHOUSE_DIR}"}}}}}
+EOF
+)"
+  fi
+}
+
+ensure_airflow_kpo_rbac() {
+  kubectl apply -n "${AIRFLOW_NAMESPACE}" -f - <<EOF
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: airflow-kpo-role
+rules:
+- apiGroups: [""]
+  resources: ["configmaps", "secrets", "serviceaccounts"]
+  verbs: ["get"]
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
+- apiGroups: [""]
+  resources: ["pods/log"]
+  verbs: ["get"]
+- apiGroups: ["events.k8s.io", ""]
+  resources: ["events"]
+  verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: airflow-kpo-rolebinding
+subjects:
+- kind: ServiceAccount
+  name: airflow-serviceaccount
+  namespace: ${AIRFLOW_NAMESPACE}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: airflow-kpo-role
+EOF
 }
 
 install_superset_database() {
@@ -230,6 +411,10 @@ install_superset_database() {
 }
 
 apply_storage_stack() {
+  if kubectl -n "${STORAGE_NAMESPACE}" get hdfscluster hdfs >/dev/null 2>&1; then
+    STORAGE_STACK_ALREADY_PRESENT="true"
+  fi
+
   kubectl apply -n "${STORAGE_NAMESPACE}" -f - <<'EOF'
 apiVersion: zookeeper.stackable.tech/v1alpha1
 kind: ZookeeperCluster
@@ -239,6 +424,10 @@ spec:
   image:
     productVersion: 3.9.4
   servers:
+    config:
+      affinity:
+        nodeSelector:
+          agentpool: nodepool1
     roleGroups:
       default:
         replicas: 1
@@ -264,6 +453,9 @@ spec:
     zookeeperConfigMapName: hdfs-znode
   nameNodes:
     config:
+      affinity:
+        nodeSelector:
+          agentpool: nodepool1
       listenerClass: cluster-internal
       resources:
         cpu:
@@ -277,6 +469,9 @@ spec:
         replicas: 2
   dataNodes:
     config:
+      affinity:
+        nodeSelector:
+          agentpool: nodepool1
       listenerClass: cluster-internal
       resources:
         storage:
@@ -459,17 +654,24 @@ main() {
 
   patch_listener_classes_internal
   install_airflow_stack
+  pin_disk_backed_workloads_to_primary_pool
   normalize_airflow_stack_exposure
   downsize_stackable_operator_deployments
+  downsize_stackable_secret_csi_daemonset
   tune_cockpit_resources
   tune_airflow_stack
   tune_trino_stack
   tune_opa_stack
   downsize_minio
+  ensure_minio_online
+  ensure_minio_buckets
+  tune_hive_metastore
+  ensure_airflow_kpo_rbac
   install_superset_database
   apply_storage_stack
   apply_superset
   apply_nifi
+  restart_unready_existing_workloads
 
   wait_for_rollouts "${AIRFLOW_NAMESPACE}"
   wait_for_rollouts "${STORAGE_NAMESPACE}"

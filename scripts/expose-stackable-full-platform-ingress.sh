@@ -198,6 +198,8 @@ metadata:
   namespace: stackable-streaming
   annotations:
     nginx.ingress.kubernetes.io/backend-protocol: HTTPS
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
     nginx.ingress.kubernetes.io/whitelist-source-range: ${ALLOWED_SOURCE_RANGES}
 spec:
   ingressClassName: ${INGRESS_CLASS_NAME}
@@ -220,6 +222,8 @@ metadata:
   namespace: default
   annotations:
     nginx.ingress.kubernetes.io/backend-protocol: HTTPS
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
     nginx.ingress.kubernetes.io/whitelist-source-range: ${ALLOWED_SOURCE_RANGES}
 spec:
   ingressClassName: ${INGRESS_CLASS_NAME}

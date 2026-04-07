@@ -69,15 +69,6 @@ jobs:
           tenant-id: ${{ env.AZURE_TENANT_ID_VALUE }}
           subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID_VALUE != '' && env.AZURE_SUBSCRIPTION_ID_VALUE || env.SUBSCRIPTION_ID }}
 
-      - name: Validate Required Secrets
-        env:
-          COCKPIT_ADMIN_PASSWORD: ${{ secrets.STACKABLE_COCKPIT_ADMIN_PASSWORD }}
-        run: |
-          if [[ -z "${COCKPIT_ADMIN_PASSWORD}" ]]; then
-            echo "STACKABLE_COCKPIT_ADMIN_PASSWORD must be set for the full platform workflow." >&2
-            exit 1
-          fi
-
       - name: Setup kubectl
         uses: azure/setup-kubectl@v4
         with:
