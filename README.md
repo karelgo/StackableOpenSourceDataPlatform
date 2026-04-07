@@ -136,8 +136,8 @@ Defaults:
 - AKS cluster: `dev-stackable-full-aks`
 - Location: `swedencentral`
 - AKS pricing tier: `Standard` (paid control plane)
-- Node count: `2`
-- Node size: `Standard_D4s_v3`
+- Node count: `1`
+- Node size: `Standard_D8s_v3`
 - Auxiliary nodepool: `d2pool` with `1 x Standard_D2s_v3`
 - Operator namespace: `stackable-operators`
 - Cockpit namespace: `stackable-cockpit`
@@ -176,7 +176,7 @@ The script deploys:
 - Superset plus PostgreSQL in `stackable-analytics`
 - NiFi in `stackable-streaming`
 
-This script is tuned for the current quota-constrained AKS shape in this subscription: `2 x Standard_D4s_v3` plus `1 x Standard_D2s_v3`. In `swedencentral`, the current subscription quota is fully allocated at `10 / 10` regional vCPUs, so increasing worker-node capacity requires a quota increase or a different region.
+This script is tuned for the current quota-constrained AKS shape in this subscription: `1 x Standard_D8s_v3` plus `1 x Standard_D2s_v3`. In `swedencentral`, the current subscription quota is fully allocated at `10 / 10` regional vCPUs, so increasing total worker capacity still requires a quota increase or a different region.
 
 Default UI credentials created by the workload script:
 
