@@ -3,6 +3,21 @@ name: Deploy Stackable Full Platform
 on:
   workflow_dispatch:
     inputs:
+      subscription_id:
+        description: Azure subscription ID override. Leave blank to use the AZURE_SUBSCRIPTION_ID secret.
+        required: false
+        default: ""
+        type: string
+      resource_group:
+        description: Azure resource group for the AKS cluster
+        required: false
+        default: dev-stackable-rg
+        type: string
+      aks_cluster_name:
+        description: AKS cluster name
+        required: false
+        default: dev-stackable-full-aks
+        type: string
       location:
         description: Azure region for the AKS cluster
         required: false
@@ -24,14 +39,14 @@ concurrency:
 
 env:
   AZURE_CORE_OUTPUT: none
-  RESOURCE_GROUP: dev-stackable-rg
-  SUBSCRIPTION_ID: 4910a5a6-aec6-405d-9294-c7f2845512a4
-  AKS_CLUSTER_NAME: dev-stackable-full-aks
+  SUBSCRIPTION_ID: ${{ inputs.subscription_id != '' && inputs.subscription_id || secrets.AZURE_SUBSCRIPTION_ID }}
+  RESOURCE_GROUP: ${{ inputs.resource_group }}
+  AKS_CLUSTER_NAME: ${{ inputs.aks_cluster_name }}
+  LOCATION: ${{ inputs.location }}
   USE_AZURE_CREDENTIALS: ${{ secrets.AZURE_CREDENTIALS != '' && 'true' || 'false' }}
   AZURE_CREDENTIALS_JSON: ${{ secrets.AZURE_CREDENTIALS }}
   AZURE_CLIENT_ID_VALUE: ${{ secrets.AZURE_CLIENT_ID }}
   AZURE_TENANT_ID_VALUE: ${{ secrets.AZURE_TENANT_ID }}
-  AZURE_SUBSCRIPTION_ID_VALUE: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
 jobs:
   deploy:
@@ -43,6 +58,18 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Validate Deployment Inputs
+        run: |
+          missing=()
+          [[ -n "${SUBSCRIPTION_ID}" ]] || missing+=("subscription_id input or AZURE_SUBSCRIPTION_ID secret")
+          [[ -n "${RESOURCE_GROUP}" ]] || missing+=("resource_group input")
+          [[ -n "${AKS_CLUSTER_NAME}" ]] || missing+=("aks_cluster_name input")
+          [[ -n "${LOCATION}" ]] || missing+=("location input")
+          if [[ ${#missing[@]} -gt 0 ]]; then
+            printf 'Missing required deployment input(s): %s\n' "${missing[*]}" >&2
+            exit 1
+          fi
 
       - name: Azure Login With Service Principal Secret
         if: ${{ env.USE_AZURE_CREDENTIALS == 'true' }}
@@ -67,7 +94,7 @@ jobs:
         with:
           client-id: ${{ env.AZURE_CLIENT_ID_VALUE }}
           tenant-id: ${{ env.AZURE_TENANT_ID_VALUE }}
-          subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID_VALUE != '' && env.AZURE_SUBSCRIPTION_ID_VALUE || env.SUBSCRIPTION_ID }}
+          subscription-id: ${{ env.SUBSCRIPTION_ID }}
 
       - name: Setup kubectl
         uses: azure/setup-kubectl@v4
@@ -81,7 +108,6 @@ jobs:
 
       - name: Deploy Base AKS Cluster And Cockpit
         env:
-          LOCATION: ${{ inputs.location }}
           COCKPIT_ADMIN_PASSWORD: ${{ secrets.STACKABLE_COCKPIT_ADMIN_PASSWORD }}
         run: |
           bash ./scripts/deploy-stackable-full-aks.sh
@@ -110,9 +136,10 @@ jobs:
         run: |
           {
             echo "## Stackable Full Platform"
+            echo "- Subscription: \`${SUBSCRIPTION_ID}\`"
             echo "- Resource group: \`${RESOURCE_GROUP}\`"
             echo "- Cluster: \`${AKS_CLUSTER_NAME}\`"
-            echo "- Location: \`${{ inputs.location }}\`"
+            echo "- Location: \`${LOCATION}\`"
             if [[ -n "${{ inputs.allowed_source_ranges }}" ]]; then
               echo "- Public ingress: enabled"
               echo "- Allowed source ranges: \`${{ inputs.allowed_source_ranges }}\`"

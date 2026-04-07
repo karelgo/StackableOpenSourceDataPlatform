@@ -235,6 +235,13 @@ Azure authentication:
 }
 ```
 
+Workflow dispatch inputs:
+
+- Both GitHub workflows now accept `subscription_id`, `resource_group`, `aks_cluster_name`, and `location` as `workflow_dispatch` inputs
+- `subscription_id` can be left blank to fall back to the `AZURE_SUBSCRIPTION_ID` secret
+- The full platform workflow defaults to `dev-stackable-rg` / `dev-stackable-full-aks` / `swedencentral`
+- The RAG workflow defaults to `dev-stackable-rg` / `dev-stackable-aks` / `swedencentral`
+
 Full platform workflow secrets:
 
 - Optional: `STACKABLE_COCKPIT_ADMIN_PASSWORD`
