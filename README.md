@@ -7,10 +7,14 @@ The current upstream `opensearch-rag` demo manifests expect deployment into the 
 ## Files
 
 - `scripts/deploy-stackable-rag-aks.sh`: end-to-end AKS and demo deployment script
+- `scripts/deploy-stackable-airflow-trino-aks.sh`: end-to-end AKS deployment for a minimal Airflow + Trino platform
 - `scripts/deploy-stackable-full-aks.sh`: end-to-end AKS and full platform deployment script for the current full Stackable release plus Cockpit
+- `scripts/deploy-stackable-full-openshift.sh`: base platform deployment for an existing OpenShift cluster
+- `scripts/deploy-stackable-full-workloads-openshift.sh`: trimmed demo workloads for the OpenShift deployment path
 - `scripts/deploy-stackable-full-workloads.sh`: deploys a resource-trimmed set of actual Stackable workloads on `dev-stackable-full-aks`
 - `scripts/expose-opensearch-dashboards-ingress.sh`: exposes the RAG JupyterLab and Dashboards UIs through trusted HTTPS on a single ingress IP
 - `scripts/expose-stackable-full-platform-ingress.sh`: exposes the full-platform UIs through a single IP-restricted ingress
+- `OPENSHIFT.md`: OpenShift-specific deployment notes, trial guidance, and the new script entrypoints
 - `.github/workflows/deploy-stackable-full-platform.yml`: GitHub Actions workflow for the full platform
 - `.github/workflows/deploy-stackable-rag.yml`: GitHub Actions workflow for the RAG demo
 - `AUTONOMOUS_AGENT_PROMPT.md`: the prompt you asked me to preserve alongside the deployment assets
@@ -123,6 +127,37 @@ ALLOWED_SOURCE_RANGES=84.104.63.18/32 \
 ```bash
 az group delete --name dev-stackable-rg --yes --no-wait
 ```
+
+## Minimal Airflow + Trino Deployment
+
+If you want the smallest practical AKS setup in this repo, use:
+
+```bash
+chmod +x ./scripts/deploy-stackable-airflow-trino-aks.sh
+./scripts/deploy-stackable-airflow-trino-aks.sh
+```
+
+This path is pinned to Stackable release `26.3` and keeps the footprint intentionally narrow:
+
+- installs only the `commons`, `listener`, `secret`, `airflow`, `trino`, `hive`, and `opa` operators
+- deploys the built-in `trino-iceberg` stack for a usable Trino + Hive + MinIO data plane
+- deploys a separate Airflow cluster backed by PostgreSQL and using `KubernetesExecutor`, so there is no Redis, Kafka, Spark, Cockpit, or public ingress in the minimal path
+
+Defaults:
+
+- AKS cluster: `dev-stackable-airflow-trino-aks`
+- Namespace: `default`
+- Node size: `Standard_D4s_v3`
+- Node count: `1`
+- Operator namespace: `stackable-operators`
+
+Default credentials created by the script:
+
+- Airflow: `admin` / `adminadmin`
+- Trino: `admin` / `adminadmin`
+- MinIO: `admin` / `adminadmin`
+
+By default everything stays internal to the cluster. The script prints `kubectl port-forward` commands for Airflow, Trino, and the MinIO console after the deployment completes.
 
 ## Full Platform Deployment
 
